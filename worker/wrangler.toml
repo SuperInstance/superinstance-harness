@@ -1,0 +1,12 @@
+name = "harness-api"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "harness-cycles"
+database_id = "ab00a9b4-3534-4fa6-8201-89c7d342ebaa"
+
+[[kv_namespaces]]
+binding = "STATE"
+id = "dbdc9a179f494a3d91296f8c2ebbb1b4"
