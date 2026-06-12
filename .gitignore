@@ -1,1 +1,1 @@
-/target
+node_modules/\ntarget/\n.wrangler/\n.env\ndist/\n*.lock
