@@ -22,6 +22,7 @@ interface HarnessMetrics {
   optimal_gamma: number;
   regret: number;
   cycle_count: number;
+  low_quality_streak: number;
 }
 
 interface HarnessState {
@@ -70,9 +71,24 @@ function enforceConservation(s: HarnessState): void {
 function computeSignal(s: HarnessState): -1 | 0 | 1 {
   const roi = s.performance.exploration_roi;
   const quality = s.performance.ewma_quality;
+  const gammaFraction = s.gamma / s.capacity;
+
+  // Quality-weighted signal: if quality < 0.5, invert the reward
+  // High gamma + low quality = decrease exploitation (stop doing the bad thing)
+  if (quality < 0.5) {
+    if (gammaFraction > 0.6) return -1; // Spending heavily on exploitation but producing garbage — back off
+    if (roi < 0.3) return -1;            // Low ROI + low quality — try exploring instead
+    return 0;
+  }
+
   if (roi > 0.6 && quality > 0.6) return -1; // Decrease exploitation
   if (roi < 0.3) return 1;                    // Increase exploitation
   return 0;                                     // Maintain
+}
+
+function qualityGateRebalance(s: HarnessState): boolean {
+  // Force rebalance if quality drops below its own EWMA for 3+ consecutive cycles
+  return s.performance.low_quality_streak >= 3;
 }
 
 function applySignal(s: HarnessState, signal: -1 | 0 | 1): void {
@@ -138,6 +154,32 @@ app.post('/cycle', async (c) => {
   state.performance.regret += Math.max(0, hindsight - productivity);
 
   state.performance.cycle_count++;
+
+  // Track quality streak for quality gate
+  if (body.output_quality < state.performance.ewma_quality) {
+    state.performance.low_quality_streak = (state.performance.low_quality_streak || 0) + 1;
+  } else {
+    state.performance.low_quality_streak = 0;
+  }
+
+  // Quality gate: force rebalance if quality declining for 3+ consecutive cycles
+  if (qualityGateRebalance(state)) {
+    // Reset to balanced allocation (50/50) to break feedback loop
+    state.gamma = 0.5 * state.capacity;
+    state.eta = 0.5 * state.capacity;
+    state.performance.low_quality_streak = 0;
+    enforceConservation(state);
+    state.performance.optimal_gamma = state.gamma;
+    await c.env.STATE.put('harness_state', JSON.stringify(state));
+    return c.json({
+      ok: true,
+      signal: 'Rebalance (quality gate)',
+      signal_value: 0,
+      rebalance: true,
+      new_allocation: { gamma: state.gamma, eta: state.eta },
+      metrics: state.performance,
+    });
+  }
 
   // Compute signal and apply
   const signal = computeSignal(state);

@@ -106,6 +106,8 @@ pub struct PerformanceMetrics {
     pub regret: f64,
     /// Total cycles processed
     pub cycle_count: u64,
+    /// Consecutive cycles where output_quality < ewma_quality (for quality gate)
+    pub low_quality_streak: u32,
 }
 
 impl Default for PerformanceMetrics {
@@ -116,6 +118,7 @@ impl Default for PerformanceMetrics {
             optimal_gamma: 0.7,
             regret: 0.0,
             cycle_count: 0,
+            low_quality_streak: 0,
         }
     }
 }
@@ -234,9 +237,22 @@ impl HarnessState {
         };
         self.performance.regret += (hindsight_value - actual_value).max(0.0);
 
+        // Track quality streak for quality gate
+        if record.output_quality < self.performance.ewma_quality {
+            self.performance.low_quality_streak += 1;
+        } else {
+            self.performance.low_quality_streak = 0;
+        }
+
         // Store history
         self.history.push(record);
         self.performance.cycle_count += 1;
+
+        // Quality gate: force rebalance if quality declining for 3+ consecutive cycles
+        if self.quality_gate_triggered() {
+            self.rebalance();
+            return TernarySignal::Maintain; // Signal rebalance happened, no incremental change
+        }
 
         // Generate signal for next cycle
         let signal = self.compute_signal();
@@ -244,10 +260,23 @@ impl HarnessState {
         signal
     }
 
-    /// Compute ternary signal based on current metrics
+    /// Compute ternary signal based on current metrics, weighted by quality
     pub fn compute_signal(&self) -> TernarySignal {
         let roi = self.performance.exploration_roi;
         let quality = self.performance.ewma_quality;
+        let gamma_fraction = self.gamma_fraction();
+
+        // Quality-weighted signal: if quality < 0.5, invert the reward direction.
+        // High gamma + low quality = decrease exploitation (stop doing the bad thing).
+        if quality < 0.5 {
+            if gamma_fraction > 0.6 {
+                return TernarySignal::Decrease; // Spending heavily but producing garbage — back off
+            }
+            if roi < 0.3 {
+                return TernarySignal::Decrease; // Low ROI + low quality — try exploring
+            }
+            return TernarySignal::Maintain;
+        }
 
         // If exploration ROI is high and quality is good → explore more (decrease exploitation)
         if roi > 0.6 && quality > 0.6 {
@@ -261,6 +290,21 @@ impl HarnessState {
         else {
             TernarySignal::Maintain
         }
+    }
+
+    /// Check if the quality gate should trigger a forced rebalance.
+    /// Returns true when output_quality has been below EWMA for 3+ consecutive cycles.
+    pub fn quality_gate_triggered(&self) -> bool {
+        self.performance.low_quality_streak >= 3
+    }
+
+    /// Force a rebalance: reset to 50/50 allocation to break feedback loops
+    pub fn rebalance(&mut self) {
+        self.gamma = 0.5 * self.capacity;
+        self.eta = 0.5 * self.capacity;
+        self.performance.low_quality_streak = 0;
+        self.enforce_conservation();
+        self.performance.optimal_gamma = self.gamma;
     }
 
     /// Apply a ternary signal to adjust allocation
@@ -447,7 +491,28 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_cycles_converge() {
+    fn test_low_quality_inverts_signal() {
+        let mut h = HarnessState::new();
+        // Start with high gamma (0.7) and force quality below 0.5
+        // by recording cycles with terrible output quality
+        for i in 0..15 {
+            let record = CycleRecord {
+                timestamp: 1000 + i,
+                gamma_spent: h.gamma,
+                eta_spent: h.eta,
+                output_quality: 0.1, // Very low quality
+                output_quantity: 1.0,
+                exploration_yield: 0.1, // Low ROI
+            };
+            h.record_cycle(record);
+        }
+
+        // With low quality (< 0.5) and high gamma fraction, the signal should
+        // invert to Decrease (back off exploitation), not increase it
+        let signal = h.compute_signal();
+        assert_eq!(signal, TernarySignal::Decrease, "Low quality + high gamma should decrease exploitation");
+        assert!(h.verify_conservation());
+    }
         let mut h = HarnessState::new();
 
         // Simulate cycles with low exploration yield → should converge to more exploitation
