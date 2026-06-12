@@ -216,7 +216,7 @@ impl HarnessState {
             alpha * cycle_roi + (1.0 - alpha) * self.performance.exploration_roi;
 
         // Compute optimal hindsight allocation for this cycle
-        let hindsight_gamma = if record.exploration_yield > 0.5 {
+        let _hindsight_gamma = if record.exploration_yield > 0.5 {
             // Exploration was fruitful → should have explored more
             record.gamma_spent * 0.9
         } else {
